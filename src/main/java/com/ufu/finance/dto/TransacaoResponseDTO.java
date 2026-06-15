@@ -1,6 +1,7 @@
 package com.ufu.finance.dto;
 
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.ufu.finance.entity.Transacao;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -21,6 +22,14 @@ public class TransacaoResponseDTO {
     private String descricao;
     private String tipo;         // "R" ou "D"
     private String tipoDescricao; // "Receita" ou "Despesa"
+
+    /**
+     * Alerta de orçamento (RF10). Populado APENAS em POST /api/transaction —
+     * nas listagens o campo é null e omitido do JSON via @JsonInclude.
+     * true → essa transação fez o gasto na categoria/mês atingir >= 80% do limite.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean alertaOrcamento;
 
     public TransacaoResponseDTO(Transacao t) {
         this.idTransacao   = t.getId();

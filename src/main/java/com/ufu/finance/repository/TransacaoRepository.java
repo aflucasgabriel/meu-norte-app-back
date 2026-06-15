@@ -60,6 +60,26 @@ public interface TransacaoRepository extends JpaRepository<Transacao, Long> {
             @Param("ano") int ano);
 
     /**
+     * Soma das transações de uma categoria específica num mês/ano por tipo.
+     * Usado pelo OrcamentoService (cálculo de `consumido`) e pelo TransacaoService
+     * (cálculo de `alertaOrcamento` ao criar transação).
+     */
+    @Query("""
+            SELECT COALESCE(SUM(t.valor), 0) FROM Transacao t
+            WHERE t.usuario.id = :usuarioId
+              AND t.categoria.id = :idCategoria
+              AND t.tipo = :tipo
+              AND MONTH(t.dataHoraTransacao) = :mes
+              AND YEAR(t.dataHoraTransacao)  = :ano
+            """)
+    BigDecimal sumByCategoriaTipoMesAno(
+            @Param("usuarioId") Long usuarioId,
+            @Param("idCategoria") Integer idCategoria,
+            @Param("tipo") TipoTransacao tipo,
+            @Param("mes") int mes,
+            @Param("ano") int ano);
+
+    /**
      * Totais agrupados por categoria para o mês — útil para gráfico de pizza.
      * Retorna Object[]: [nomeCategoria (String), total (BigDecimal)]
      */

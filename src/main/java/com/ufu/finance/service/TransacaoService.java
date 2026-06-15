@@ -29,6 +29,9 @@ public class TransacaoService {
     @Autowired
     private CategoriaRepository categoriaRepository;
 
+    @Autowired
+    private OrcamentoService orcamentoService;
+
     // ─── CRUD ────────────────────────────────────────────────────────────────
 
     /** Cria uma nova transação vinculada ao usuário autenticado */
@@ -47,7 +50,21 @@ public class TransacaoService {
         transacao.setDescricao(dto.getDescricao());
         transacao.setTipo(dto.getTipo());
 
-        return new TransacaoResponseDTO(transacaoRepository.save(transacao));
+        Transacao saved = transacaoRepository.save(transacao);
+        TransacaoResponseDTO response = new TransacaoResponseDTO(saved);
+
+        // RF10: setar alertaOrcamento apenas pra despesas. Para receitas, sempre false
+        // (decisão de negócio #5: campo sempre presente na resposta de POST).
+        if (saved.getTipo() == TipoTransacao.D) {
+            LocalDateTime dh = saved.getDataHoraTransacao();
+            boolean alerta = orcamentoService.shouldAlert(
+                    usuarioId, dto.getIdCategoria(), dh.getMonthValue(), dh.getYear());
+            response.setAlertaOrcamento(alerta);
+        } else {
+            response.setAlertaOrcamento(false);
+        }
+
+        return response;
     }
 
     /** Remove uma transação — só o dono pode deletar */

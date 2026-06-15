@@ -1,0 +1,211 @@
+package com.ufu.finance.service;
+
+import com.ufu.finance.dto.OrcamentoRequestDTO;
+import com.ufu.finance.dto.OrcamentoResponseDTO;
+import com.ufu.finance.entity.Categoria;
+import com.ufu.finance.entity.Orcamento;
+import com.ufu.finance.entity.Usuario;
+import com.ufu.finance.enums.TipoTransacao;
+import com.ufu.finance.repository.CategoriaRepository;
+import com.ufu.finance.repository.OrcamentoRepository;
+import com.ufu.finance.repository.TransacaoRepository;
+import com.ufu.finance.repository.UsuarioRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Regras de negócio dos orçamentos mensais por categoria (RF06).
+ *
+ * Decisões de negócio (validadas com o time em 2026-06-12):
+ *  - Unicidade: 1 orçamento por (usuário, categoria, mês, ano) → 409 ao duplicar
+ *  - Threshold de alerta: gasto/limite >= 80%
+ *  - PUT atualiza todos os campos (idCategoria, mês, ano, limite)
+ *  - DELETE livre — transações antigas permanecem, só o limite some
+ *  - `consumido` = SUM(transações tipo=D na categoria/mês/ano)
+ */
+@Service
+public class OrcamentoService {
+
+    private static final BigDecimal ALERT_THRESHOLD = new BigDecimal("0.80");
+
+    @Autowired
+    private OrcamentoRepository orcamentoRepository;
+
+    @Autowired
+    private UsuarioRepository usuarioRepository;
+
+    @Autowired
+    private CategoriaRepository categoriaRepository;
+
+    @Autowired
+    private TransacaoRepository transacaoRepository;
+
+    // ─── CRUD ────────────────────────────────────────────────────────────────
+
+    public OrcamentoResponseDTO criar(OrcamentoRequestDTO dto, Long usuarioId) {
+        validarMesAno(dto.getMes(), dto.getAno());
+
+        Usuario usuario = usuarioRepository.findById(usuarioId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Usuário não encontrado"));
+
+        Categoria categoria = categoriaRepository.findById(dto.getIdCategoria())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Categoria não encontrada"));
+
+        if (orcamentoRepository.existsByUsuarioIdAndCategoriaIdAndMesAndAno(
+                usuarioId, dto.getIdCategoria(), dto.getMes(), dto.getAno())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Já existe orçamento para esta categoria no mês/ano informado");
+        }
+
+        Orcamento orcamento = new Orcamento();
+        orcamento.setUsuario(usuario);
+        orcamento.setCategoria(categoria);
+        orcamento.setMes(dto.getMes());
+        orcamento.setAno(dto.getAno());
+        orcamento.setLimite(dto.getLimite());
+
+        try {
+            Orcamento saved = orcamentoRepository.save(orcamento);
+            return montarResponse(saved);
+        } catch (DataIntegrityViolationException e) {
+            // Defesa em profundidade caso a verificação acima escape em concorrência.
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Já existe orçamento para esta categoria no mês/ano informado");
+        }
+    }
+
+    public OrcamentoResponseDTO buscarPorId(Long id, Long usuarioId) {
+        Orcamento orcamento = buscarEAutorizar(id, usuarioId);
+        return montarResponse(orcamento);
+    }
+
+    public OrcamentoResponseDTO atualizar(Long id, OrcamentoRequestDTO dto, Long usuarioId) {
+        validarMesAno(dto.getMes(), dto.getAno());
+
+        Orcamento orcamento = buscarEAutorizar(id, usuarioId);
+
+        // Verifica se a nova combinação (categoria, mês, ano) não colide com outro orçamento.
+        boolean mudouChave =
+                !orcamento.getCategoria().getId().equals(dto.getIdCategoria())
+                        || !orcamento.getMes().equals(dto.getMes())
+                        || !orcamento.getAno().equals(dto.getAno());
+
+        if (mudouChave && orcamentoRepository.existsByUsuarioIdAndCategoriaIdAndMesAndAno(
+                usuarioId, dto.getIdCategoria(), dto.getMes(), dto.getAno())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Já existe orçamento para esta categoria no mês/ano informado");
+        }
+
+        Categoria categoria = categoriaRepository.findById(dto.getIdCategoria())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Categoria não encontrada"));
+
+        orcamento.setCategoria(categoria);
+        orcamento.setMes(dto.getMes());
+        orcamento.setAno(dto.getAno());
+        orcamento.setLimite(dto.getLimite());
+
+        try {
+            Orcamento saved = orcamentoRepository.save(orcamento);
+            return montarResponse(saved);
+        } catch (DataIntegrityViolationException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Já existe orçamento para esta categoria no mês/ano informado");
+        }
+    }
+
+    public void deletar(Long id, Long usuarioId) {
+        Orcamento orcamento = buscarEAutorizar(id, usuarioId);
+        orcamentoRepository.delete(orcamento);
+    }
+
+    // ─── Consultas ────────────────────────────────────────────────────────────
+
+    public List<OrcamentoResponseDTO> listarOrcamentosDoUsuario(Long usuarioId) {
+        return orcamentoRepository.findByUsuarioIdOrderByAnoDescMesDesc(usuarioId).stream()
+                .map(this::montarResponse)
+                .collect(Collectors.toList());
+    }
+
+    public List<OrcamentoResponseDTO> listarOrcamentosMes(Long usuarioId, int mes, int ano) {
+        validarMesAno(mes, ano);
+        return orcamentoRepository.findByUsuarioIdAndMesAndAno(usuarioId, mes, ano).stream()
+                .map(this::montarResponse)
+                .collect(Collectors.toList());
+    }
+
+    public OrcamentoResponseDTO buscarOrcamentoCategoriaMes(
+            Long usuarioId, Integer idCategoria, int mes, int ano) {
+        validarMesAno(mes, ano);
+        Orcamento orcamento = orcamentoRepository
+                .findByUsuarioIdAndCategoriaIdAndMesAndAno(usuarioId, idCategoria, mes, ano)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Orçamento não encontrado para esta categoria/mês"));
+        return montarResponse(orcamento);
+    }
+
+    // ─── Helper público pra TransacaoService (RF10) ───────────────────────────
+
+    /**
+     * Decide se o POST /api/transaction deve devolver {@code alertaOrcamento: true}.
+     * True quando existe orçamento pra (categoria, mês, ano) E o gasto acumulado
+     * (já incluindo a transação recém-salva) >= 80% do limite.
+     * Quando não há orçamento, retorna false (decisão de negócio #5).
+     */
+    public boolean shouldAlert(Long usuarioId, Integer idCategoria, int mes, int ano) {
+        return orcamentoRepository
+                .findByUsuarioIdAndCategoriaIdAndMesAndAno(usuarioId, idCategoria, mes, ano)
+                .map(orcamento -> {
+                    BigDecimal limite = orcamento.getLimite();
+                    if (limite == null || limite.signum() <= 0) return false;
+                    BigDecimal consumido = consumidoNoMes(usuarioId, idCategoria, mes, ano);
+                    BigDecimal threshold = limite.multiply(ALERT_THRESHOLD);
+                    return consumido.compareTo(threshold) >= 0;
+                })
+                .orElse(false);
+    }
+
+    // ─── Internos ─────────────────────────────────────────────────────────────
+
+    private Orcamento buscarEAutorizar(Long id, Long usuarioId) {
+        Orcamento orcamento = orcamentoRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Orçamento não encontrado"));
+        if (!orcamento.getUsuario().getId().equals(usuarioId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Acesso negado: este orçamento pertence a outro usuário");
+        }
+        return orcamento;
+    }
+
+    private OrcamentoResponseDTO montarResponse(Orcamento orcamento) {
+        OrcamentoResponseDTO dto = new OrcamentoResponseDTO(orcamento);
+        BigDecimal consumido = consumidoNoMes(
+                orcamento.getUsuario().getId(),
+                orcamento.getCategoria().getId(),
+                orcamento.getMes(),
+                orcamento.getAno());
+        dto.atualizarConsumo(consumido);
+        return dto;
+    }
+
+    private BigDecimal consumidoNoMes(Long usuarioId, Integer idCategoria, int mes, int ano) {
+        BigDecimal soma = transacaoRepository.sumByCategoriaTipoMesAno(
+                usuarioId, idCategoria, TipoTransacao.D, mes, ano);
+        return soma != null ? soma : BigDecimal.ZERO;
+    }
+
+    private void validarMesAno(int mes, int ano) {
+        if (mes < 1 || mes > 12) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mês inválido, deve ser entre 1 e 12");
+        }
+        if (ano < 2000 || ano > 2100) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ano inválido");
+        }
+    }
+}
