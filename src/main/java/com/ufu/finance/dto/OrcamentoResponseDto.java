@@ -2,14 +2,14 @@ package com.ufu.finance.dto;
 
 import com.ufu.finance.entity.Orcamento;
 import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.NoArgsConstructor;                                  
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
  * DTO para resposta de orçamento
- * Inclui informações do orçamento + consumo atual
+ * Inclui informações do orçamento + consumo atual                   
  */
 @Data
 @NoArgsConstructor
